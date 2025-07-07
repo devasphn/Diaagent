@@ -1,8 +1,3 @@
-#!/usr/bin/env python3
-"""
-Dia TTS Real-Time Conversational AI Agent - Fixed Version
-Complete implementation for RunPod A40 GPU
-"""
 
 import os
 import sys
