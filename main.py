@@ -28,29 +28,39 @@ class DiaVoiceAgent:
         self.is_loaded = False
         self.conversation_history = []
         self.speaker_consistency_prompt = None
+        self.device = "cuda" if self._check_cuda() else "cpu"
+        
+    def _check_cuda(self) -> bool:
+        """Check if CUDA is available"""
+        try:
+            import torch
+            return torch.cuda.is_available()
+        except ImportError:
+            return False
         
     def load_model(self):
-        """Load Dia model with correct parameters"""
+        """Load Dia model with correct API"""
         print("🤖 Loading Dia model...")
         
         try:
+            from nari_tts import Dia
             import torch
-            from dia.model import Dia
             
             # Set seed for consistency
             torch.manual_seed(self.voice_seed)
-            torch.cuda.manual_seed_all(self.voice_seed)
-            random.seed(self.voice_seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed(self.voice_seed)
             
-            # Load model with correct parameters (no device_map or compute_dtype)
+            # Load model with correct API
+            print("📥 Downloading model from HuggingFace...")
             self.model = Dia.from_pretrained("nari-labs/Dia-1.6B")
             
-            # Move model to GPU if available
-            if torch.cuda.is_available():
-                self.model = self.model.cuda()
-                print("✅ Model loaded on GPU")
+            # Move to GPU if available
+            if self.device == "cuda":
+                self.model = self.model.to("cuda")
+                print(f"✅ Model loaded on GPU: {torch.cuda.get_device_name()}")
             else:
-                print("⚠️  Model loaded on CPU")
+                print("⚠️  Model loaded on CPU (GPU not available)")
             
             # Setup reference audio if provided
             if self.reference_audio_path and os.path.exists(self.reference_audio_path):
@@ -61,6 +71,7 @@ class DiaVoiceAgent:
             
         except Exception as e:
             print(f"❌ Model loading failed: {e}")
+            print("💡 Make sure you have access to the model and HF_TOKEN is set if needed")
             raise
     
     def setup_voice_cloning(self):
@@ -69,25 +80,24 @@ class DiaVoiceAgent:
         
         try:
             import soundfile as sf
-            import numpy as np
             
             # Load reference audio
             audio_data, sample_rate = sf.read(self.reference_audio_path)
+            
+            # Ensure audio is the right format
+            if len(audio_data.shape) > 1:
+                audio_data = audio_data.mean(axis=1)  # Convert to mono
             
             # Resample to 44100 Hz if needed
             if sample_rate != 44100:
                 import librosa
                 audio_data = librosa.resample(audio_data, orig_sr=sample_rate, target_sr=44100)
             
-            # Ensure audio is mono
-            if len(audio_data.shape) > 1:
-                audio_data = np.mean(audio_data, axis=1)
-            
-            # Create consistency prompt
+            # Store for voice cloning
             self.speaker_consistency_prompt = {
                 "audio": audio_data,
                 "sample_rate": 44100,
-                "transcript": "[S1] This is my voice reference for cloning."
+                "transcript": "This is my voice reference for cloning."
             }
             
             print("✅ Voice cloning setup complete!")
@@ -103,46 +113,48 @@ class DiaVoiceAgent:
         try:
             import torch
             import soundfile as sf
-            import numpy as np
+            import io
             
             # Set seed for consistency
             torch.manual_seed(self.voice_seed)
-            torch.cuda.manual_seed_all(self.voice_seed)
-            random.seed(self.voice_seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed(self.voice_seed)
             
             # Format text for single speaker
             formatted_text = self.format_text_for_single_speaker(text)
             
-            # Generate audio using the correct API
+            # Generate audio with correct API
             if use_voice_cloning and self.speaker_consistency_prompt:
                 # Use voice cloning with reference audio
-                print("🎤 Generating with voice cloning...")
                 output = self.model.generate(
                     formatted_text,
                     reference_audio=self.speaker_consistency_prompt['audio'],
-                    seed=self.voice_seed
+                    temperature=0.7,
+                    max_length=1000
                 )
             else:
                 # Standard generation with fixed seed
-                print("🗣️  Generating with fixed seed...")
                 output = self.model.generate(
                     formatted_text,
-                    seed=self.voice_seed
+                    temperature=0.7,
+                    max_length=1000
                 )
+            
+            # Convert to bytes
+            buffer = io.BytesIO()
             
             # Ensure output is numpy array
             if hasattr(output, 'cpu'):
                 output = output.cpu().numpy()
             
-            # Convert to bytes
-            buffer = io.BytesIO()
+            # Write as WAV
             sf.write(buffer, output, 44100, format='WAV')
             return buffer.getvalue()
             
         except Exception as e:
             print(f"❌ Speech generation failed: {e}")
             # Return empty audio on failure
-            import soundfile as sf
+            import numpy as np
             silence = np.zeros(44100)  # 1 second of silence
             buffer = io.BytesIO()
             sf.write(buffer, silence, 44100, format='WAV')
@@ -153,20 +165,24 @@ class DiaVoiceAgent:
         # Clean and format text
         text = text.strip()
         
-        # Remove existing speaker tags to ensure single speaker
+        # Remove any existing speaker tags
         text = text.replace("[S1]", "").replace("[S2]", "").strip()
         
         # Add single speaker tag
-        text = f"[S1] {text}"
+        formatted_text = f"[S1] {text}"
         
-        return text
+        # Ensure proper ending
+        if not text.endswith(('.', '!', '?')):
+            formatted_text += "."
+        
+        return formatted_text
     
     def process_conversation_turn(self, user_input: str) -> bytes:
         """Process a conversation turn and return audio response"""
         # Add to conversation history
         self.conversation_history.append({"role": "user", "content": user_input})
         
-        # Generate response (you can integrate with LLM here)
+        # Generate response (integrate with your LLM here)
         response_text = self.generate_response(user_input)
         
         # Add response to history
@@ -178,7 +194,7 @@ class DiaVoiceAgent:
         return audio_bytes
     
     def generate_response(self, user_input: str) -> str:
-        """Generate text response (integrate with your preferred LLM)"""
+        """Generate text response (replace with your LLM integration)"""
         # Simple responses for demonstration
         responses = [
             f"I understand you said: {user_input}. That's interesting!",
@@ -186,11 +202,11 @@ class DiaVoiceAgent:
             f"That's a great point about {user_input}. What do you think about it?",
             f"I appreciate your input on {user_input}. How does that make you feel?",
             f"Regarding {user_input}, I find that fascinating. Can you elaborate?",
-            f"Your comment about {user_input} is thought-provoking. What's your perspective?",
+            f"You mentioned {user_input}. That reminds me of something similar.",
         ]
         
         # Use seed for consistent but varied responses
-        random.seed(self.voice_seed + len(self.conversation_history))
+        random.seed(hash(user_input) + self.voice_seed)
         return random.choice(responses)
 
 class RealTimeVoiceServer:
@@ -208,7 +224,7 @@ class RealTimeVoiceServer:
         from fastapi.middleware.cors import CORSMiddleware
         import json
         
-        app = FastAPI(title="Dia Real-Time Voice Agent", version="1.0.0")
+        app = FastAPI(title="Dia Real-Time Voice Agent", version="2.0.0")
         
         # Add CORS middleware
         app.add_middleware(
@@ -224,8 +240,12 @@ class RealTimeVoiceServer:
             return HTMLResponse(self.get_web_interface())
         
         @app.get("/health")
-        async def health():
-            return {"status": "healthy", "model_loaded": self.voice_agent.is_loaded}
+        async def health_check():
+            return {
+                "status": "healthy",
+                "model_loaded": self.voice_agent.is_loaded,
+                "device": self.voice_agent.device
+            }
         
         @app.post("/generate-speech")
         async def generate_speech(text: str):
@@ -266,8 +286,8 @@ class RealTimeVoiceServer:
             """Upload voice reference for cloning"""
             try:
                 # Validate file type
-                if not file.filename.lower().endswith(('.wav', '.mp3', '.flac', '.m4a')):
-                    raise HTTPException(status_code=400, detail="Unsupported audio format")
+                if not file.content_type.startswith('audio/'):
+                    raise HTTPException(status_code=400, detail="File must be an audio file")
                 
                 # Save uploaded file
                 file_path = f"voice_reference_{int(time.time())}.wav"
@@ -279,7 +299,11 @@ class RealTimeVoiceServer:
                 self.voice_agent.reference_audio_path = file_path
                 self.voice_agent.setup_voice_cloning()
                 
-                return {"message": "Voice reference uploaded successfully", "file_path": file_path}
+                return {
+                    "message": "Voice reference uploaded successfully", 
+                    "file_path": file_path,
+                    "file_size": len(content)
+                }
             except Exception as e:
                 raise HTTPException(status_code=500, detail=str(e))
         
@@ -303,7 +327,8 @@ class RealTimeVoiceServer:
                         response = {
                             "type": "audio_response",
                             "audio": audio_b64,
-                            "format": "wav"
+                            "format": "wav",
+                            "text": message["text"]
                         }
                         await websocket.send_text(json.dumps(response))
                         
@@ -316,80 +341,121 @@ class RealTimeVoiceServer:
         return app
     
     def get_web_interface(self) -> str:
-        """Return HTML web interface"""
+        """Return enhanced HTML web interface"""
         return """
         <!DOCTYPE html>
         <html>
         <head>
             <title>Dia Real-Time Voice Agent</title>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
             <style>
+                * { box-sizing: border-box; }
                 body { 
-                    font-family: Arial, sans-serif; 
-                    max-width: 800px; 
+                    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+                    max-width: 1000px; 
                     margin: 0 auto; 
                     padding: 20px; 
-                    background: #f0f2f5;
+                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                    min-height: 100vh;
                 }
                 .container { 
                     background: white; 
-                    padding: 20px; 
-                    border-radius: 10px; 
-                    margin: 10px 0; 
-                    box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+                    padding: 25px; 
+                    border-radius: 15px; 
+                    margin: 15px 0; 
+                    box-shadow: 0 8px 32px rgba(0,0,0,0.1);
                 }
-                button { 
-                    background: #007bff; 
-                    color: white; 
-                    border: none; 
-                    padding: 10px 20px; 
-                    border-radius: 5px; 
-                    cursor: pointer; 
-                    margin: 5px;
-                    transition: background 0.3s;
-                }
-                button:hover { background: #0056b3; }
-                button:disabled { background: #ccc; cursor: not-allowed; }
-                input, textarea { 
-                    width: 100%; 
-                    padding: 10px; 
-                    margin: 5px 0; 
-                    border: 1px solid #ddd; 
-                    border-radius: 5px; 
-                    box-sizing: border-box;
-                }
-                #status { 
-                    padding: 10px; 
-                    margin: 10px 0; 
-                    border-radius: 5px; 
-                    font-weight: bold;
-                }
-                .success { background: #d4edda; color: #155724; }
-                .error { background: #f8d7da; color: #721c24; }
-                .loading { background: #fff3cd; color: #856404; }
-                .header { 
+                h1 { 
                     text-align: center; 
                     color: #333; 
-                    margin-bottom: 20px;
+                    margin-bottom: 30px;
+                    font-size: 2.5em;
                 }
-                .feature-list {
-                    list-style: none;
-                    padding: 0;
+                h3 { 
+                    color: #555; 
+                    border-bottom: 2px solid #667eea;
+                    padding-bottom: 10px;
                 }
-                .feature-list li {
-                    padding: 5px 0;
-                    border-bottom: 1px solid #eee;
+                button { 
+                    background: linear-gradient(45deg, #667eea, #764ba2); 
+                    color: white; 
+                    border: none; 
+                    padding: 12px 24px; 
+                    border-radius: 8px; 
+                    cursor: pointer; 
+                    margin: 8px; 
+                    font-size: 14px;
+                    transition: all 0.3s ease;
                 }
-                .feature-list li:before {
-                    content: "✅ ";
-                    color: #28a745;
+                button:hover { 
+                    transform: translateY(-2px);
+                    box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+                }
+                button:disabled {
+                    background: #ccc;
+                    cursor: not-allowed;
+                    transform: none;
+                }
+                input, textarea { 
+                    width: 100%; 
+                    padding: 12px; 
+                    margin: 8px 0; 
+                    border: 2px solid #ddd; 
+                    border-radius: 8px; 
+                    font-size: 14px;
+                    transition: border-color 0.3s ease;
+                }
+                input:focus, textarea:focus {
+                    border-color: #667eea;
+                    outline: none;
+                }
+                #status { 
+                    padding: 12px; 
+                    margin: 12px 0; 
+                    border-radius: 8px; 
+                    font-weight: bold;
+                }
+                .success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+                .error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+                .info { background: #d1ecf1; color: #0c5460; border: 1px solid #bee5eb; }
+                audio { width: 100%; margin-top: 15px; }
+                .loading { 
+                    display: inline-block; 
+                    width: 20px; 
+                    height: 20px; 
+                    border: 3px solid #f3f3f3; 
+                    border-top: 3px solid #667eea; 
+                    border-radius: 50%; 
+                    animation: spin 1s linear infinite; 
+                }
+                @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+                .conversation-history {
+                    max-height: 300px;
+                    overflow-y: auto;
+                    border: 1px solid #ddd;
+                    padding: 10px;
+                    margin: 10px 0;
+                    border-radius: 8px;
+                    background: #f9f9f9;
+                }
+                .message {
+                    margin: 8px 0;
+                    padding: 8px;
+                    border-radius: 6px;
+                }
+                .user-message {
+                    background: #e3f2fd;
+                    text-align: right;
+                }
+                .bot-message {
+                    background: #f3e5f5;
+                    text-align: left;
                 }
             </style>
         </head>
         <body>
-            <div class="header">
-                <h1>🤖 Dia Real-Time Voice Agent</h1>
-                <p>Ultra-realistic AI voice generation with conversation capabilities</p>
-            </div>
+            <h1>🤖 Dia Real-Time Voice Agent</h1>
             
             <div class="container">
                 <h3>📊 System Status</h3>
@@ -399,52 +465,36 @@ class RealTimeVoiceServer:
             
             <div class="container">
                 <h3>🎤 Voice Reference Upload</h3>
-                <p>Upload a 10-second audio sample for voice cloning:</p>
+                <p>Upload a 10-second audio sample of your voice for cloning:</p>
                 <input type="file" id="voiceFile" accept="audio/*">
                 <button onclick="uploadVoiceReference()">Upload Voice Reference</button>
+                <div id="uploadStatus"></div>
             </div>
             
             <div class="container">
                 <h3>🗣️ Text to Speech</h3>
-                <textarea id="textInput" placeholder="Enter text to convert to speech..." rows="3"></textarea>
-                <button onclick="generateSpeech()">Generate Speech</button>
+                <textarea id="textInput" placeholder="Enter text to convert to speech..." rows="4"></textarea>
+                <button onclick="generateSpeech()" id="generateBtn">Generate Speech</button>
                 <audio id="audioPlayer" controls style="width: 100%; margin-top: 10px;"></audio>
             </div>
             
             <div class="container">
                 <h3>💬 Real-Time Conversation</h3>
+                <div class="conversation-history" id="conversationHistory"></div>
                 <input type="text" id="conversationInput" placeholder="Type your message...">
-                <button onclick="sendMessage()">Send Message</button>
-                <button onclick="connectWebSocket()">Connect WebSocket</button>
+                <button onclick="sendMessage()" id="sendBtn">Send Message</button>
+                <button onclick="connectWebSocket()" id="connectBtn">Connect WebSocket</button>
                 <div id="status"></div>
-            </div>
-            
-            <div class="container">
-                <h3>✨ Features</h3>
-                <ul class="feature-list">
-                    <li>Single speaker consistency with fixed seed</li>
-                    <li>Voice cloning with 10-second audio samples</li>
-                    <li>Real-time conversation processing</li>
-                    <li>WebSocket support for instant responses</li>
-                    <li>Professional web interface</li>
-                    <li>RESTful API endpoints</li>
-                </ul>
             </div>
             
             <script>
                 let ws = null;
-                let isGenerating = false;
+                let conversationHistory = [];
                 
-                function showStatus(message, type = 'success') {
-                    const status = document.getElementById('status');
-                    status.textContent = message;
-                    status.className = type;
-                }
-                
-                function showHealthStatus(message, type = 'success') {
-                    const status = document.getElementById('healthStatus');
-                    status.textContent = message;
-                    status.className = type;
+                function showStatus(message, type = 'info', elementId = 'status') {
+                    const statusEl = document.getElementById(elementId);
+                    statusEl.textContent = message;
+                    statusEl.className = type;
                 }
                 
                 async function checkHealth() {
@@ -452,13 +502,10 @@ class RealTimeVoiceServer:
                         const response = await fetch('/health');
                         const data = await response.json();
                         
-                        if (data.model_loaded) {
-                            showHealthStatus('✅ System healthy - Model loaded and ready', 'success');
-                        } else {
-                            showHealthStatus('⚠️ System healthy - Model not loaded', 'loading');
-                        }
+                        let message = `Status: ${data.status} | Model: ${data.model_loaded ? 'Loaded' : 'Not Loaded'} | Device: ${data.device}`;
+                        showStatus(message, 'success', 'healthStatus');
                     } catch (error) {
-                        showHealthStatus('❌ System error: ' + error.message, 'error');
+                        showStatus('Health check failed: ' + error.message, 'error', 'healthStatus');
                     }
                 }
                 
@@ -467,12 +514,7 @@ class RealTimeVoiceServer:
                     const file = fileInput.files[0];
                     
                     if (!file) {
-                        showStatus('Please select a file', 'error');
-                        return;
-                    }
-                    
-                    if (file.size > 50 * 1024 * 1024) { // 50MB limit
-                        showStatus('File too large. Please use a file smaller than 50MB.', 'error');
+                        showStatus('Please select an audio file', 'error', 'uploadStatus');
                         return;
                     }
                     
@@ -480,39 +522,36 @@ class RealTimeVoiceServer:
                     formData.append('file', file);
                     
                     try {
-                        showStatus('Uploading voice reference...', 'loading');
+                        showStatus('Uploading...', 'info', 'uploadStatus');
                         const response = await fetch('/upload-voice-reference', {
                             method: 'POST',
                             body: formData
                         });
                         
                         if (response.ok) {
-                            showStatus('Voice reference uploaded successfully!', 'success');
+                            const data = await response.json();
+                            showStatus(`Voice reference uploaded successfully! Size: ${data.file_size} bytes`, 'success', 'uploadStatus');
                         } else {
                             const error = await response.json();
-                            showStatus('Upload failed: ' + error.detail, 'error');
+                            showStatus('Upload failed: ' + error.detail, 'error', 'uploadStatus');
                         }
                     } catch (error) {
-                        showStatus('Upload error: ' + error.message, 'error');
+                        showStatus('Upload error: ' + error.message, 'error', 'uploadStatus');
                     }
                 }
                 
                 async function generateSpeech() {
                     const text = document.getElementById('textInput').value;
+                    const btn = document.getElementById('generateBtn');
                     
                     if (!text.trim()) {
                         showStatus('Please enter some text', 'error');
                         return;
                     }
                     
-                    if (isGenerating) {
-                        showStatus('Already generating speech, please wait...', 'loading');
-                        return;
-                    }
-                    
                     try {
-                        isGenerating = true;
-                        showStatus('Generating speech...', 'loading');
+                        btn.disabled = true;
+                        btn.innerHTML = '<span class="loading"></span> Generating...';
                         
                         const response = await fetch('/generate-speech?text=' + encodeURIComponent(text), {
                             method: 'POST'
@@ -530,13 +569,16 @@ class RealTimeVoiceServer:
                     } catch (error) {
                         showStatus('Error: ' + error.message, 'error');
                     } finally {
-                        isGenerating = false;
+                        btn.disabled = false;
+                        btn.innerHTML = 'Generate Speech';
                     }
                 }
                 
                 function connectWebSocket() {
+                    const btn = document.getElementById('connectBtn');
+                    
                     if (ws && ws.readyState === WebSocket.OPEN) {
-                        showStatus('WebSocket already connected!', 'success');
+                        ws.close();
                         return;
                     }
                     
@@ -545,6 +587,8 @@ class RealTimeVoiceServer:
                     
                     ws.onopen = function() {
                         showStatus('WebSocket connected!', 'success');
+                        btn.textContent = 'Disconnect WebSocket';
+                        btn.style.background = '#dc3545';
                     };
                     
                     ws.onmessage = function(event) {
@@ -554,40 +598,64 @@ class RealTimeVoiceServer:
                             const audioUrl = URL.createObjectURL(audioBlob);
                             document.getElementById('audioPlayer').src = audioUrl;
                             document.getElementById('audioPlayer').play();
-                            showStatus('Response received and playing!', 'success');
+                            
+                            // Add to conversation history
+                            addToConversationHistory('Bot', 'Audio response generated');
                         }
                     };
                     
                     ws.onerror = function() {
-                        showStatus('WebSocket error occurred', 'error');
+                        showStatus('WebSocket error', 'error');
                     };
                     
                     ws.onclose = function() {
-                        showStatus('WebSocket disconnected', 'error');
+                        showStatus('WebSocket disconnected', 'info');
+                        btn.textContent = 'Connect WebSocket';
+                        btn.style.background = 'linear-gradient(45deg, #667eea, #764ba2)';
                     };
                 }
                 
                 function sendMessage() {
                     const input = document.getElementById('conversationInput');
                     const message = input.value.trim();
+                    const btn = document.getElementById('sendBtn');
                     
-                    if (!message) {
-                        showStatus('Please enter a message', 'error');
+                    if (!message || !ws || ws.readyState !== WebSocket.OPEN) {
+                        showStatus('Please connect WebSocket and enter a message', 'error');
                         return;
                     }
                     
-                    if (!ws || ws.readyState !== WebSocket.OPEN) {
-                        showStatus('Please connect WebSocket first', 'error');
-                        return;
+                    try {
+                        btn.disabled = true;
+                        btn.innerHTML = '<span class="loading"></span> Processing...';
+                        
+                        ws.send(JSON.stringify({
+                            type: 'text_input',
+                            text: message
+                        }));
+                        
+                        // Add to conversation history
+                        addToConversationHistory('You', message);
+                        
+                        input.value = '';
+                        showStatus('Message sent, generating response...', 'info');
+                    } catch (error) {
+                        showStatus('Error sending message: ' + error.message, 'error');
+                    } finally {
+                        setTimeout(() => {
+                            btn.disabled = false;
+                            btn.innerHTML = 'Send Message';
+                        }, 2000);
                     }
-                    
-                    ws.send(JSON.stringify({
-                        type: 'text_input',
-                        text: message
-                    }));
-                    
-                    input.value = '';
-                    showStatus('Message sent, generating response...', 'loading');
+                }
+                
+                function addToConversationHistory(sender, message) {
+                    const historyEl = document.getElementById('conversationHistory');
+                    const messageEl = document.createElement('div');
+                    messageEl.className = 'message ' + (sender === 'You' ? 'user-message' : 'bot-message');
+                    messageEl.innerHTML = `<strong>${sender}:</strong> ${message}`;
+                    historyEl.appendChild(messageEl);
+                    historyEl.scrollTop = historyEl.scrollHeight;
                 }
                 
                 // Enter key support
@@ -597,8 +665,10 @@ class RealTimeVoiceServer:
                     }
                 });
                 
-                // Auto-check health on page load
-                window.addEventListener('load', checkHealth);
+                // Auto-check health on load
+                window.onload = function() {
+                    checkHealth();
+                };
             </script>
         </body>
         </html>
@@ -611,24 +681,24 @@ class RealTimeVoiceServer:
         self.create_fastapi_app()
         print(f"🚀 Starting server on port {self.port}")
         print(f"🌐 Access the web interface at: http://localhost:{self.port}")
-        print(f"📡 WebSocket endpoint: ws://localhost:{self.port}/ws")
-        print(f"🔗 API documentation: http://localhost:{self.port}/docs")
+        print(f"📱 Or use your RunPod URL: http://[your-runpod-url]:{self.port}")
         
-        uvicorn.run(self.app, host="0.0.0.0", port=self.port)
+        uvicorn.run(self.app, host="0.0.0.0", port=self.port, log_level="info")
 
 def main():
     """Main execution function"""
-    print("🎯 Dia TTS Real-Time Conversational AI Agent - Fixed Version")
+    print("🎯 Dia TTS Real-Time Conversational AI Agent v2.0")
     print("=" * 60)
     
-    # Check if model is already installed
-    try:
-        import dia
-        print("✅ Dia library found!")
-    except ImportError:
-        print("❌ Dia library not found. Please install it first:")
-        print("pip install -e .")
-        sys.exit(1)
+    # Set environment variables
+    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+    
+    # Check HuggingFace token
+    hf_token = os.getenv("HF_TOKEN")
+    if not hf_token:
+        print("⚠️  HF_TOKEN not set. You may need to set it for model access.")
+        print("💡 Run: export HF_TOKEN=your_token_here")
     
     # Initialize voice agent
     print("🤖 Initializing voice agent...")
@@ -642,7 +712,7 @@ def main():
         voice_agent.load_model()
     except Exception as e:
         print(f"❌ Failed to load model: {e}")
-        print("Please check your GPU memory and CUDA installation.")
+        print("💡 Make sure you have internet connection and model access")
         sys.exit(1)
     
     # Create and run server
@@ -653,17 +723,17 @@ def main():
     print("✅ Voice cloning support (10-second audio)")
     print("✅ Real-time conversation")
     print("✅ WebSocket support")
-    print("✅ Professional web interface")
+    print("✅ Enhanced web interface")
     print("✅ REST API endpoints")
     print("✅ Health monitoring")
     
+    # Run server
     try:
-        # Run server
         server.run()
     except KeyboardInterrupt:
         print("\n👋 Server stopped by user")
     except Exception as e:
-        print(f"❌ Server error: {e}")
+        print(f"\n❌ Server error: {e}")
 
 if __name__ == "__main__":
     main()
