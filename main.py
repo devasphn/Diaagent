@@ -39,10 +39,11 @@ def get_hf_token():
     return None
 
 class DiaVoiceAgent:
-    """Advanced Dia TTS Voice Agent with correct API usage"""
+    """Advanced Dia TTS Voice Agent using HuggingFace Transformers"""
     
     def __init__(self, voice_seed: int = 42, reference_audio_path: Optional[str] = None):
         self.model = None
+        self.processor = None
         self.voice_seed = voice_seed
         self.reference_audio_path = reference_audio_path
         self.is_loaded = False
@@ -59,10 +60,11 @@ class DiaVoiceAgent:
             return False
         
     def load_model(self):
-        """Load Dia model using the correct official API"""
-        print("🤖 Loading Dia model with correct API...")
+        """Load Dia model using HuggingFace Transformers (CORRECT METHOD)"""
+        print("🤖 Loading Dia model using HuggingFace Transformers...")
         
         try:
+            from transformers import AutoProcessor, DiaForConditionalGeneration
             import torch
             
             # Set seed for consistency
@@ -70,21 +72,14 @@ class DiaVoiceAgent:
             if torch.cuda.is_available():
                 torch.cuda.manual_seed(self.voice_seed)
             
-            # Get HuggingFace token
-            hf_token = get_hf_token()
-            if not hf_token:
-                raise ValueError("HuggingFace token is required but not found")
+            # Use the official HuggingFace Transformers model
+            model_checkpoint = "nari-labs/Dia-1.6B-0626"  # Official transformers-compatible model
             
-            print("📥 Loading Dia model from HuggingFace Hub...")
+            print(f"📥 Loading processor from {model_checkpoint}...")
+            self.processor = AutoProcessor.from_pretrained(model_checkpoint)
             
-            # Use the correct Dia.from_pretrained method (this is the official way)
-            from dia import Dia
-            
-            # Load model using the official HuggingFace Hub integration
-            self.model = Dia.from_pretrained(
-                "nari-labs/Dia-1.6B",
-                token=hf_token
-            )
+            print(f"📥 Loading model from {model_checkpoint}...")
+            self.model = DiaForConditionalGeneration.from_pretrained(model_checkpoint)
             
             # Move to device
             if self.device == "cuda":
@@ -101,36 +96,46 @@ class DiaVoiceAgent:
                 self.setup_voice_cloning()
             
             self.is_loaded = True
-            print("✅ Dia model loaded successfully!")
+            print("✅ Dia model loaded successfully using HuggingFace Transformers!")
             
         except Exception as e:
             print(f"❌ Model loading failed: {e}")
-            print("💡 Trying alternative loading approach...")
+            print("💡 Trying alternative model checkpoint...")
             
-            # Alternative approach: Use the official repository method
+            # Try alternative model checkpoint
             try:
-                from dia import Dia
+                from transformers import AutoProcessor, DiaForConditionalGeneration
                 
-                # Load without specifying token in constructor (relies on HF CLI login)
-                self.model = Dia.from_pretrained("nari-labs/Dia-1.6B")
+                # Try the buttercrab version (official transformers integration)
+                model_checkpoint = "buttercrab/dia-v1-1.6b"
+                
+                print(f"📥 Loading processor from {model_checkpoint}...")
+                self.processor = AutoProcessor.from_pretrained(model_checkpoint)
+                
+                print(f"📥 Loading model from {model_checkpoint}...")
+                self.model = DiaForConditionalGeneration.from_pretrained(model_checkpoint)
                 
                 # Move to device
                 if self.device == "cuda":
                     self.model = self.model.to("cuda")
-                    print(f"✅ Model loaded on GPU with alternative method")
+                    print(f"✅ Model loaded on GPU with alternative checkpoint")
                 else:
-                    print("⚠️  Model loaded on CPU with alternative method")
+                    print("⚠️  Model loaded on CPU with alternative checkpoint")
                 
                 self.model.eval()
                 self.is_loaded = True
-                print("✅ Dia model loaded successfully with alternative method!")
+                print("✅ Dia model loaded successfully with alternative checkpoint!")
                 
             except Exception as e2:
                 print(f"❌ Alternative loading also failed: {e2}")
+                print("💡 Available troubleshooting:")
+                print("   1. Make sure transformers is up to date: pip install --upgrade transformers")
+                print("   2. Check internet connection")
+                print("   3. Verify HuggingFace token access")
                 raise e2
     
     def generate_speech(self, text: str, use_voice_cloning: bool = True) -> bytes:
-        """Generate speech using the correct Dia API"""
+        """Generate speech using HuggingFace Transformers API"""
         if not self.is_loaded:
             raise RuntimeError("Model not loaded. Call load_model() first.")
         
@@ -149,33 +154,44 @@ class DiaVoiceAgent:
             
             print(f"🎤 Generating speech for: {formatted_text}")
             
-            # Generate audio using the correct Dia API
+            # Prepare inputs using the processor
+            if use_voice_cloning and self.speaker_consistency_prompt:
+                # Use voice cloning with reference audio
+                inputs = self.processor(
+                    text=[formatted_text], 
+                    audio=self.speaker_consistency_prompt['audio'],
+                    padding=True, 
+                    return_tensors="pt"
+                ).to(self.device)
+                
+                # Get audio prompt length for correct decoding
+                prompt_len = self.processor.get_audio_prompt_len(inputs["decoder_attention_mask"])
+            else:
+                # Standard generation
+                inputs = self.processor(
+                    text=[formatted_text], 
+                    padding=True, 
+                    return_tensors="pt"
+                ).to(self.device)
+                prompt_len = None
+            
+            # Generate audio using the model
             with torch.no_grad():
-                if use_voice_cloning and self.speaker_consistency_prompt:
-                    # Use voice cloning with reference audio
-                    output = self.model.generate(
-                        text=formatted_text,
-                        reference_audio=self.speaker_consistency_prompt['audio']
-                    )
-                else:
-                    # Standard generation
-                    output = self.model.generate(text=formatted_text)
+                outputs = self.model.generate(**inputs, max_new_tokens=256)  # ~2s of audio
+            
+            # Decode the generated audio
+            if prompt_len is not None:
+                # For voice cloning, remove the prompt from output
+                outputs = self.processor.batch_decode(outputs, audio_prompt_len=prompt_len)
+            else:
+                # For standard generation
+                outputs = self.processor.batch_decode(outputs)
             
             # Convert to bytes
             buffer = io.BytesIO()
             
-            # Ensure output is numpy array
-            if hasattr(output, 'cpu'):
-                output = output.cpu().numpy()
-            elif hasattr(output, 'detach'):
-                output = output.detach().cpu().numpy()
-            
-            # Handle different output formats
-            if output.ndim > 1:
-                output = output.squeeze()
-            
-            # Write as WAV
-            sf.write(buffer, output, 44100, format='WAV')
+            # Save audio using the processor
+            self.processor.save_audio(outputs, buffer, format="wav")
             buffer.seek(0)
             
             print("✅ Speech generated successfully!")
@@ -215,6 +231,7 @@ class DiaVoiceAgent:
         try:
             import soundfile as sf
             import numpy as np
+            from datasets import Audio
             
             # Load reference audio
             audio_data, sample_rate = sf.read(self.reference_audio_path)
@@ -228,16 +245,11 @@ class DiaVoiceAgent:
                 import librosa
                 audio_data = librosa.resample(audio_data, orig_sr=sample_rate, target_sr=44100)
             
-            # Convert to tensor if needed
-            import torch
-            if isinstance(audio_data, np.ndarray):
-                audio_data = torch.from_numpy(audio_data).float()
-            
-            # Store for voice cloning
+            # Store for voice cloning (as numpy array for HuggingFace processor)
             self.speaker_consistency_prompt = {
                 "audio": audio_data,
                 "sample_rate": 44100,
-                "transcript": "This is my voice reference for cloning."
+                "transcript": "[S1] This is my voice reference for cloning."
             }
             
             print("✅ Voice cloning setup complete!")
@@ -282,7 +294,7 @@ class RealTimeVoiceServer:
         from fastapi.middleware.cors import CORSMiddleware
         import json
         
-        app = FastAPI(title="Dia Real-Time Voice Agent", version="2.3.0")
+        app = FastAPI(title="Dia Real-Time Voice Agent", version="3.0.0")
         
         # Add CORS middleware
         app.add_middleware(
@@ -303,7 +315,8 @@ class RealTimeVoiceServer:
                 "status": "healthy",
                 "model_loaded": self.voice_agent.is_loaded,
                 "device": self.voice_agent.device,
-                "hf_token_available": get_hf_token() is not None
+                "hf_token_available": get_hf_token() is not None,
+                "implementation": "HuggingFace Transformers"
             }
         
         @app.post("/generate-speech")
@@ -514,7 +527,7 @@ class RealTimeVoiceServer:
             </style>
         </head>
         <body>
-            <h1>🤖 Dia Real-Time Voice Agent</h1>
+            <h1>🤖 Dia Real-Time Voice Agent v3.0</h1>
             
             <div class="container">
                 <h3>📊 System Status</h3>
@@ -561,7 +574,7 @@ class RealTimeVoiceServer:
                         const response = await fetch('/health');
                         const data = await response.json();
                         
-                        let message = `Status: ${data.status} | Model: ${data.model_loaded ? 'Loaded' : 'Not Loaded'} | Device: ${data.device} | HF Token: ${data.hf_token_available ? 'Available' : 'Not Available'}`;
+                        let message = `Status: ${data.status} | Model: ${data.model_loaded ? 'Loaded' : 'Not Loaded'} | Device: ${data.device} | HF Token: ${data.hf_token_available ? 'Available' : 'Not Available'} | Implementation: ${data.implementation}`;
                         showStatus(message, 'success', 'healthStatus');
                     } catch (error) {
                         showStatus('Health check failed: ' + error.message, 'error', 'healthStatus');
@@ -746,8 +759,9 @@ class RealTimeVoiceServer:
 
 def main():
     """Main execution function"""
-    print("🎯 Dia TTS Real-Time Conversational AI Agent v2.3")
-    print("=" * 60)
+    print("🎯 Dia TTS Real-Time Conversational AI Agent v3.0")
+    print("=" * 70)
+    print("✨ Now using HuggingFace Transformers integration!")
     
     # Set environment variables
     os.environ["CUDA_VISIBLE_DEVICES"] = "0"
@@ -758,9 +772,8 @@ def main():
     if hf_token:
         print("✅ HuggingFace token found and ready to use")
     else:
-        print("❌ No HuggingFace token found - this is required!")
+        print("⚠️  No HuggingFace token found")
         print("💡 Run: huggingface-cli login")
-        sys.exit(1)
     
     # Initialize voice agent
     print("🤖 Initializing voice agent...")
@@ -777,13 +790,13 @@ def main():
     server = RealTimeVoiceServer(voice_agent, port=8000)
     
     print("\n🎉 Setup complete! Features available:")
+    print("✅ HuggingFace Transformers integration")
     print("✅ Single speaker consistency (fixed seed)")
     print("✅ Voice cloning support (10-second audio)")
     print("✅ Real-time conversation")
     print("✅ WebSocket support")
     print("✅ Enhanced web interface")
-    print("✅ REST API endpoints")
-    print("✅ Proper Dia model loading")
+    print("✅ Production-ready architecture")
     
     # Run server
     try:
