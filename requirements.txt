@@ -1,6 +1,4 @@
 
-torch>=2.0.0
-torchaudio
 transformers>=4.30.0
 accelerate
 gradio
@@ -18,7 +16,5 @@ requests
 huggingface_hub
 datasets
 tokenizers
-
-# Dia-specific dependencies
 descript-audio-codec>=1.0.0
 safetensors>=0.5.3
