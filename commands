@@ -1,1 +1,25 @@
+cd workspace
+python3 -m venv venv
+source venv/bin/activate
+git clone https://github.com/devasphn/Diaagent/ 
+cd Diaagent
+
+apt-get update && apt-get install -y libsox-dev libsndfile1-dev portaudio19-dev
+
+pip install --upgrade pip
+
+apt-get update -qq",
+            "apt-get install -y git wget curl ffmpeg sox libsox-fmt-all",
+            "pip install --upgrade pip setuptools wheel
+
+git clone https://github.com/nari-labs/dia.git
+cd dia
+pip install -e .
+
+huggingface-cli login
+
+pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+
+pip install -r requirements.txt
+
 
