@@ -1,8 +1,3 @@
-#!/usr/bin/env python3
-"""
-Dia TTS Real-Time Conversational AI Agent
-FINAL SOLUTION - IndexError Fixed
-"""
 
 import os
 import sys
@@ -18,6 +13,7 @@ from typing import Optional, Dict, Any, List
 import base64
 import io
 import random
+import numpy as np
 
 # Suppress warnings
 warnings.filterwarnings("ignore")
