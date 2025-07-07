@@ -60,7 +60,7 @@ class DiaVoiceAgent:
             return False
         
     def load_model(self):
-        """Load Dia model using HuggingFace Transformers (CORRECT METHOD)"""
+        """Load Dia model using HuggingFace Transformers"""
         print("🤖 Loading Dia model using HuggingFace Transformers...")
         
         try:
@@ -73,7 +73,7 @@ class DiaVoiceAgent:
                 torch.cuda.manual_seed(self.voice_seed)
             
             # Use the official HuggingFace Transformers model
-            model_checkpoint = "nari-labs/Dia-1.6B-0626"  # Official transformers-compatible model
+            model_checkpoint = "nari-labs/Dia-1.6B-0626"
             
             print(f"📥 Loading processor from {model_checkpoint}...")
             self.processor = AutoProcessor.from_pretrained(model_checkpoint)
@@ -100,39 +100,7 @@ class DiaVoiceAgent:
             
         except Exception as e:
             print(f"❌ Model loading failed: {e}")
-            print("💡 Trying alternative model checkpoint...")
-            
-            # Try alternative model checkpoint
-            try:
-                from transformers import AutoProcessor, DiaForConditionalGeneration
-                
-                # Try the buttercrab version (official transformers integration)
-                model_checkpoint = "buttercrab/dia-v1-1.6b"
-                
-                print(f"📥 Loading processor from {model_checkpoint}...")
-                self.processor = AutoProcessor.from_pretrained(model_checkpoint)
-                
-                print(f"📥 Loading model from {model_checkpoint}...")
-                self.model = DiaForConditionalGeneration.from_pretrained(model_checkpoint)
-                
-                # Move to device
-                if self.device == "cuda":
-                    self.model = self.model.to("cuda")
-                    print(f"✅ Model loaded on GPU with alternative checkpoint")
-                else:
-                    print("⚠️  Model loaded on CPU with alternative checkpoint")
-                
-                self.model.eval()
-                self.is_loaded = True
-                print("✅ Dia model loaded successfully with alternative checkpoint!")
-                
-            except Exception as e2:
-                print(f"❌ Alternative loading also failed: {e2}")
-                print("💡 Available troubleshooting:")
-                print("   1. Make sure transformers is up to date: pip install --upgrade transformers")
-                print("   2. Check internet connection")
-                print("   3. Verify HuggingFace token access")
-                raise e2
+            raise e
     
     def generate_speech(self, text: str, use_voice_cloning: bool = True) -> bytes:
         """Generate speech using HuggingFace Transformers API"""
@@ -158,40 +126,30 @@ class DiaVoiceAgent:
             if use_voice_cloning and self.speaker_consistency_prompt:
                 # Use voice cloning with reference audio
                 inputs = self.processor(
-                    text=[formatted_text], 
+                    text=formatted_text,
                     audio=self.speaker_consistency_prompt['audio'],
-                    padding=True, 
+                    sampling_rate=44100,
                     return_tensors="pt"
                 ).to(self.device)
-                
-                # Get audio prompt length for correct decoding
-                prompt_len = self.processor.get_audio_prompt_len(inputs["decoder_attention_mask"])
             else:
                 # Standard generation
                 inputs = self.processor(
-                    text=[formatted_text], 
-                    padding=True, 
+                    text=formatted_text,
                     return_tensors="pt"
                 ).to(self.device)
-                prompt_len = None
             
             # Generate audio using the model
             with torch.no_grad():
-                outputs = self.model.generate(**inputs, max_new_tokens=256)  # ~2s of audio
+                outputs = self.model.generate(**inputs, max_new_tokens=256)
             
             # Decode the generated audio
-            if prompt_len is not None:
-                # For voice cloning, remove the prompt from output
-                outputs = self.processor.batch_decode(outputs, audio_prompt_len=prompt_len)
-            else:
-                # For standard generation
-                outputs = self.processor.batch_decode(outputs)
+            audio_output = self.processor.batch_decode(outputs, skip_special_tokens=True)[0]
             
             # Convert to bytes
             buffer = io.BytesIO()
             
-            # Save audio using the processor
-            self.processor.save_audio(outputs, buffer, format="wav")
+            # Write as WAV
+            sf.write(buffer, audio_output, 44100, format='WAV')
             buffer.seek(0)
             
             print("✅ Speech generated successfully!")
@@ -231,7 +189,6 @@ class DiaVoiceAgent:
         try:
             import soundfile as sf
             import numpy as np
-            from datasets import Audio
             
             # Load reference audio
             audio_data, sample_rate = sf.read(self.reference_audio_path)
@@ -245,7 +202,7 @@ class DiaVoiceAgent:
                 import librosa
                 audio_data = librosa.resample(audio_data, orig_sr=sample_rate, target_sr=44100)
             
-            # Store for voice cloning (as numpy array for HuggingFace processor)
+            # Store for voice cloning
             self.speaker_consistency_prompt = {
                 "audio": audio_data,
                 "sample_rate": 44100,
@@ -256,6 +213,42 @@ class DiaVoiceAgent:
             
         except Exception as e:
             print(f"⚠️  Voice cloning setup failed: {e}")
+    
+    def setup_voice_cloning_from_data(self, audio_data: bytes):
+        """Setup voice cloning from raw audio data"""
+        print("🎤 Setting up voice cloning from recorded audio...")
+        
+        try:
+            import soundfile as sf
+            import numpy as np
+            import io
+            
+            # Load audio from bytes
+            audio_buffer = io.BytesIO(audio_data)
+            audio_array, sample_rate = sf.read(audio_buffer)
+            
+            # Ensure audio is the right format
+            if len(audio_array.shape) > 1:
+                audio_array = audio_array.mean(axis=1)  # Convert to mono
+            
+            # Resample to 44100 Hz if needed
+            if sample_rate != 44100:
+                import librosa
+                audio_array = librosa.resample(audio_array, orig_sr=sample_rate, target_sr=44100)
+            
+            # Store for voice cloning
+            self.speaker_consistency_prompt = {
+                "audio": audio_array,
+                "sample_rate": 44100,
+                "transcript": "[S1] This is my recorded voice reference for cloning."
+            }
+            
+            print("✅ Voice cloning setup complete from recorded audio!")
+            return True
+            
+        except Exception as e:
+            print(f"⚠️  Voice cloning setup failed: {e}")
+            return False
     
     def process_conversation_turn(self, user_input: str) -> bytes:
         """Process a conversation turn and return audio response"""
@@ -280,7 +273,7 @@ class DiaVoiceAgent:
         return random.choice(responses)
 
 class RealTimeVoiceServer:
-    """Real-time voice server with WebSocket support"""
+    """Real-time voice server with WebSocket support and audio recording"""
     
     def __init__(self, voice_agent: DiaVoiceAgent, port: int = 8000):
         self.voice_agent = voice_agent
@@ -289,12 +282,12 @@ class RealTimeVoiceServer:
         
     def create_fastapi_app(self):
         """Create FastAPI application"""
-        from fastapi import FastAPI, WebSocket, UploadFile, File, HTTPException
+        from fastapi import FastAPI, WebSocket, UploadFile, File, HTTPException, Request
         from fastapi.responses import StreamingResponse, HTMLResponse
         from fastapi.middleware.cors import CORSMiddleware
         import json
         
-        app = FastAPI(title="Dia Real-Time Voice Agent", version="3.0.0")
+        app = FastAPI(title="Dia Real-Time Voice Agent", version="3.1.0")
         
         # Add CORS middleware
         app.add_middleware(
@@ -316,7 +309,8 @@ class RealTimeVoiceServer:
                 "model_loaded": self.voice_agent.is_loaded,
                 "device": self.voice_agent.device,
                 "hf_token_available": get_hf_token() is not None,
-                "implementation": "HuggingFace Transformers"
+                "implementation": "HuggingFace Transformers",
+                "features": ["audio_recording", "voice_cloning", "real_time_chat"]
             }
         
         @app.post("/generate-speech")
@@ -379,6 +373,30 @@ class RealTimeVoiceServer:
             except Exception as e:
                 raise HTTPException(status_code=500, detail=str(e))
         
+        @app.post("/record-voice-reference")
+        async def record_voice_reference(request: Request):
+            """Process recorded voice reference"""
+            try:
+                # Get the audio data from request body
+                audio_data = await request.body()
+                
+                if not audio_data:
+                    raise HTTPException(status_code=400, detail="No audio data received")
+                
+                # Setup voice cloning from recorded data
+                success = self.voice_agent.setup_voice_cloning_from_data(audio_data)
+                
+                if success:
+                    return {
+                        "message": "Voice reference recorded and setup successfully",
+                        "data_size": len(audio_data)
+                    }
+                else:
+                    raise HTTPException(status_code=500, detail="Failed to setup voice cloning from recorded audio")
+                    
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+        
         @app.websocket("/ws")
         async def websocket_endpoint(websocket: WebSocket):
             """WebSocket endpoint for real-time communication"""
@@ -413,19 +431,19 @@ class RealTimeVoiceServer:
         return app
     
     def get_web_interface(self) -> str:
-        """Return enhanced HTML web interface"""
+        """Return enhanced HTML web interface with audio recording"""
         return """
         <!DOCTYPE html>
         <html>
         <head>
-            <title>Dia Real-Time Voice Agent</title>
+            <title>Dia Real-Time Voice Agent with Recording</title>
             <meta charset="UTF-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
             <style>
                 * { box-sizing: border-box; }
                 body { 
                     font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
-                    max-width: 1000px; 
+                    max-width: 1200px; 
                     margin: 0 auto; 
                     padding: 20px; 
                     background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
@@ -469,6 +487,21 @@ class RealTimeVoiceServer:
                     cursor: not-allowed;
                     transform: none;
                 }
+                .record-btn {
+                    background: linear-gradient(45deg, #ff6b6b, #ee5a52);
+                }
+                .record-btn.recording {
+                    background: linear-gradient(45deg, #ff4757, #ff3838);
+                    animation: pulse 1s infinite;
+                }
+                @keyframes pulse {
+                    0% { transform: scale(1); }
+                    50% { transform: scale(1.05); }
+                    100% { transform: scale(1); }
+                }
+                .stop-btn {
+                    background: linear-gradient(45deg, #ffa726, #ff9800);
+                }
                 input, textarea { 
                     width: 100%; 
                     padding: 12px; 
@@ -491,6 +524,7 @@ class RealTimeVoiceServer:
                 .success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
                 .error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
                 .info { background: #d1ecf1; color: #0c5460; border: 1px solid #bee5eb; }
+                .warning { background: #fff3cd; color: #856404; border: 1px solid #ffeaa7; }
                 audio { width: 100%; margin-top: 15px; }
                 .loading { 
                     display: inline-block; 
@@ -524,10 +558,64 @@ class RealTimeVoiceServer:
                     background: #f3e5f5;
                     text-align: left;
                 }
+                .recording-controls {
+                    display: flex;
+                    align-items: center;
+                    gap: 10px;
+                    margin: 15px 0;
+                }
+                .recording-status {
+                    padding: 8px 16px;
+                    border-radius: 20px;
+                    font-size: 12px;
+                    font-weight: bold;
+                }
+                .recording-timer {
+                    background: #ffebee;
+                    color: #c62828;
+                }
+                .recording-ready {
+                    background: #e8f5e8;
+                    color: #2e7d32;
+                }
+                .audio-visualizer {
+                    width: 100%;
+                    height: 60px;
+                    background: #f5f5f5;
+                    border-radius: 8px;
+                    margin: 10px 0;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    border: 2px dashed #ddd;
+                }
+                .tabs {
+                    display: flex;
+                    margin-bottom: 20px;
+                }
+                .tab {
+                    flex: 1;
+                    padding: 12px;
+                    text-align: center;
+                    background: #f8f9fa;
+                    border: 1px solid #dee2e6;
+                    cursor: pointer;
+                    transition: all 0.3s ease;
+                }
+                .tab.active {
+                    background: linear-gradient(45deg, #667eea, #764ba2);
+                    color: white;
+                }
+                .tab-content {
+                    display: none;
+                }
+                .tab-content.active {
+                    display: block;
+                }
             </style>
         </head>
         <body>
-            <h1>🤖 Dia Real-Time Voice Agent v3.0</h1>
+            <h1>🎤 Dia Real-Time Voice Agent v3.1</h1>
             
             <div class="container">
                 <h3>📊 System Status</h3>
@@ -536,11 +624,40 @@ class RealTimeVoiceServer:
             </div>
             
             <div class="container">
-                <h3>🎤 Voice Reference Upload</h3>
-                <p>Upload a 10-second audio sample of your voice for cloning:</p>
-                <input type="file" id="voiceFile" accept="audio/*">
-                <button onclick="uploadVoiceReference()">Upload Voice Reference</button>
-                <div id="uploadStatus"></div>
+                <h3>🎤 Voice Reference Setup</h3>
+                
+                <div class="tabs">
+                    <div class="tab active" onclick="switchTab('upload')">📁 Upload Audio</div>
+                    <div class="tab" onclick="switchTab('record')">🎙️ Record Audio</div>
+                </div>
+                
+                <!-- Upload Tab -->
+                <div id="upload-tab" class="tab-content active">
+                    <p>Upload a 10-second audio sample of your voice for cloning:</p>
+                    <input type="file" id="voiceFile" accept="audio/*">
+                    <button onclick="uploadVoiceReference()">Upload Voice Reference</button>
+                    <div id="uploadStatus"></div>
+                </div>
+                
+                <!-- Recording Tab -->
+                <div id="record-tab" class="tab-content">
+                    <p>Record a 10-second sample of your voice directly in the browser:</p>
+                    
+                    <div class="recording-controls">
+                        <button id="recordBtn" class="record-btn" onclick="startRecording()">🎙️ Start Recording</button>
+                        <button id="stopBtn" class="stop-btn" onclick="stopRecording()" disabled>⏹️ Stop Recording</button>
+                        <div id="recordingStatus" class="recording-status recording-ready">Ready to record</div>
+                    </div>
+                    
+                    <div class="audio-visualizer" id="audioVisualizer">
+                        <span id="visualizerText">Audio levels will appear here during recording</span>
+                    </div>
+                    
+                    <audio id="recordedAudio" controls style="width: 100%; margin-top: 10px; display: none;"></audio>
+                    <button id="useRecordingBtn" onclick="useRecordedAudio()" style="display: none;">✅ Use This Recording</button>
+                    
+                    <div id="recordStatus"></div>
+                </div>
             </div>
             
             <div class="container">
@@ -562,11 +679,33 @@ class RealTimeVoiceServer:
             <script>
                 let ws = null;
                 let conversationHistory = [];
+                let mediaRecorder = null;
+                let audioChunks = [];
+                let recordingTimer = null;
+                let recordingSeconds = 0;
                 
                 function showStatus(message, type = 'info', elementId = 'status') {
                     const statusEl = document.getElementById(elementId);
                     statusEl.textContent = message;
                     statusEl.className = type;
+                }
+                
+                function switchTab(tabName) {
+                    // Hide all tab contents
+                    document.querySelectorAll('.tab-content').forEach(content => {
+                        content.classList.remove('active');
+                    });
+                    
+                    // Remove active class from all tabs
+                    document.querySelectorAll('.tab').forEach(tab => {
+                        tab.classList.remove('active');
+                    });
+                    
+                    // Show selected tab content
+                    document.getElementById(tabName + '-tab').classList.add('active');
+                    
+                    // Add active class to selected tab
+                    event.target.classList.add('active');
                 }
                 
                 async function checkHealth() {
@@ -609,6 +748,120 @@ class RealTimeVoiceServer:
                         }
                     } catch (error) {
                         showStatus('Upload error: ' + error.message, 'error', 'uploadStatus');
+                    }
+                }
+                
+                async function startRecording() {
+                    try {
+                        const stream = await navigator.mediaDevices.getUserMedia({ 
+                            audio: {
+                                echoCancellation: true,
+                                noiseSuppression: true,
+                                sampleRate: 44100
+                            } 
+                        });
+                        
+                        mediaRecorder = new MediaRecorder(stream, {
+                            mimeType: 'audio/webm;codecs=opus'
+                        });
+                        
+                        audioChunks = [];
+                        recordingSeconds = 0;
+                        
+                        mediaRecorder.ondataavailable = event => {
+                            audioChunks.push(event.data);
+                        };
+                        
+                        mediaRecorder.onstop = async () => {
+                            const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+                            const audioUrl = URL.createObjectURL(audioBlob);
+                            
+                            const recordedAudio = document.getElementById('recordedAudio');
+                            recordedAudio.src = audioUrl;
+                            recordedAudio.style.display = 'block';
+                            
+                            document.getElementById('useRecordingBtn').style.display = 'inline-block';
+                            
+                            // Store the blob for later use
+                            window.recordedAudioBlob = audioBlob;
+                            
+                            showStatus('Recording completed! You can now use this recording.', 'success', 'recordStatus');
+                        };
+                        
+                        mediaRecorder.start();
+                        
+                        // Update UI
+                        document.getElementById('recordBtn').disabled = true;
+                        document.getElementById('stopBtn').disabled = false;
+                        document.getElementById('recordBtn').classList.add('recording');
+                        
+                        // Start timer
+                        recordingTimer = setInterval(() => {
+                            recordingSeconds++;
+                            document.getElementById('recordingStatus').textContent = `Recording: ${recordingSeconds}s`;
+                            document.getElementById('recordingStatus').className = 'recording-status recording-timer';
+                            
+                            // Auto-stop after 30 seconds
+                            if (recordingSeconds >= 30) {
+                                stopRecording();
+                            }
+                        }, 1000);
+                        
+                        showStatus('Recording started! Speak clearly for 5-10 seconds.', 'info', 'recordStatus');
+                        
+                    } catch (error) {
+                        showStatus('Error accessing microphone: ' + error.message, 'error', 'recordStatus');
+                    }
+                }
+                
+                function stopRecording() {
+                    if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+                        mediaRecorder.stop();
+                        
+                        // Stop all tracks
+                        mediaRecorder.stream.getTracks().forEach(track => track.stop());
+                    }
+                    
+                    // Clear timer
+                    if (recordingTimer) {
+                        clearInterval(recordingTimer);
+                        recordingTimer = null;
+                    }
+                    
+                    // Update UI
+                    document.getElementById('recordBtn').disabled = false;
+                    document.getElementById('stopBtn').disabled = true;
+                    document.getElementById('recordBtn').classList.remove('recording');
+                    document.getElementById('recordingStatus').textContent = 'Recording stopped';
+                    document.getElementById('recordingStatus').className = 'recording-status recording-ready';
+                }
+                
+                async function useRecordedAudio() {
+                    if (!window.recordedAudioBlob) {
+                        showStatus('No recording available', 'error', 'recordStatus');
+                        return;
+                    }
+                    
+                    try {
+                        showStatus('Processing recorded audio...', 'info', 'recordStatus');
+                        
+                        const response = await fetch('/record-voice-reference', {
+                            method: 'POST',
+                            body: window.recordedAudioBlob,
+                            headers: {
+                                'Content-Type': 'audio/webm'
+                            }
+                        });
+                        
+                        if (response.ok) {
+                            const data = await response.json();
+                            showStatus(`Voice reference recorded successfully! Data size: ${data.data_size} bytes`, 'success', 'recordStatus');
+                        } else {
+                            const error = await response.json();
+                            showStatus('Failed to setup voice reference: ' + error.detail, 'error', 'recordStatus');
+                        }
+                    } catch (error) {
+                        showStatus('Error processing recording: ' + error.message, 'error', 'recordStatus');
                     }
                 }
                 
@@ -741,6 +994,16 @@ class RealTimeVoiceServer:
                 window.onload = function() {
                     checkHealth();
                 };
+                
+                // Check microphone permission on load
+                navigator.mediaDevices.getUserMedia({ audio: true })
+                    .then(stream => {
+                        stream.getTracks().forEach(track => track.stop());
+                        showStatus('Microphone access granted - ready to record!', 'success', 'recordStatus');
+                    })
+                    .catch(error => {
+                        showStatus('Microphone access denied. Please allow microphone access to use recording feature.', 'warning', 'recordStatus');
+                    });
             </script>
         </body>
         </html>
@@ -759,9 +1022,9 @@ class RealTimeVoiceServer:
 
 def main():
     """Main execution function"""
-    print("🎯 Dia TTS Real-Time Conversational AI Agent v3.0")
+    print("🎯 Dia TTS Real-Time Conversational AI Agent v3.1")
     print("=" * 70)
-    print("✨ Now using HuggingFace Transformers integration!")
+    print("✨ Now with Audio Recording Feature!")
     
     # Set environment variables
     os.environ["CUDA_VISIBLE_DEVICES"] = "0"
@@ -793,6 +1056,7 @@ def main():
     print("✅ HuggingFace Transformers integration")
     print("✅ Single speaker consistency (fixed seed)")
     print("✅ Voice cloning support (10-second audio)")
+    print("✅ 🎙️ BROWSER AUDIO RECORDING")
     print("✅ Real-time conversation")
     print("✅ WebSocket support")
     print("✅ Enhanced web interface")
